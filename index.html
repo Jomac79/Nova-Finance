@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ledger</title>
+<style>
+:root{--bg:#0b0f17;--card:#141b29;--line:#243049;--tx:#e8edf7;--mut:#8b97b0;--ac:#4f8cff;--ok:#2fd18b;--bad:#ff5d73}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.4 system-ui,-apple-system,Segoe UI,sans-serif;padding-bottom:76px}
+main{max-width:1100px;margin:0 auto;padding:16px}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:#0e1420;border-top:1px solid var(--line);z-index:9}
+nav button{flex:1;padding:14px 4px;background:none;border:0;color:var(--mut);font-weight:600;font-size:13px}
+nav button.on{color:var(--ac);box-shadow:inset 0 2px var(--ac)}
+@media(min-width:760px){body{padding:60px 0 0}nav{top:0;bottom:auto;justify-content:center;border:0;border-bottom:1px solid var(--line)}nav button{flex:none;padding:16px 28px;font-size:14px}nav button.on{box-shadow:inset 0 -2px var(--ac)}}
+h2{margin:6px 0 14px;font-size:22px}h3{margin:0 0 8px;font-size:13px;color:var(--mut);text-transform:uppercase;letter-spacing:.06em}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+.stat{font-size:26px;font-weight:700}.pos{color:var(--ok)}.neg{color:var(--bad)}.mut{color:var(--mut);font-size:12px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--line)}
+.row:last-child{border:0}.nm{flex:1;min-width:130px}
+input,select,button{font:inherit;color:var(--tx);background:#0e1420;border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+input[type=number]{width:110px;text-align:right}
+label{display:flex;flex-direction:column;font-size:11px;color:var(--mut);gap:2px}
+button.pri{background:var(--ac);border:0;font-weight:600;cursor:pointer}button.x{background:none;border:0;color:var(--mut);cursor:pointer}
+form{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}form input[name=n],form input[name=l]{flex:1;min-width:120px}
+.sum{display:flex;justify-content:space-between;padding:6px 0}.sum.t{border-top:1px solid var(--line);font-weight:700;margin-top:4px;padding-top:10px}
+.bar{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:8px}
+.scroll{overflow-x:auto}table{border-collapse:collapse;width:100%}td,th{padding:4px;white-space:nowrap;font-size:13px}th{color:var(--mut);font-weight:600}
+td input[type=number]{width:74px;padding:6px}td input.en{width:150px}tfoot td{font-weight:700;border-top:1px solid var(--line)}
+#auth{max-width:340px;margin:12vh auto;padding:16px}#auth input{width:100%;margin-bottom:10px}
+</style></head><body>
+<div id="auth" hidden>
+  <h2>Ledger</h2>
+  <input id="em" type="email" placeholder="Email" autocomplete="email">
+  <input id="pw" type="password" placeholder="Password" autocomplete="current-password">
+  <button class="pri" onclick="login()">Sign in</button> <button onclick="signup()">Create account</button>
+  <p class="mut" id="msg"></p>
+</div>
+<div id="app" hidden><nav id="nav"></nav><main id="v"></main></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+// ====== 1) PASTE YOUR SUPABASE VALUES (Project Settings > API) ======
+const SUPABASE_URL = 'YOUR_PROJECT_URL';
+const SUPABASE_KEY = 'YOUR_ANON_PUBLIC_KEY';
+// ====================================================================
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const MN = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const now = new Date();
+const S = {tab:'cash', y:now.getFullYear(), m:now.getMonth()+1, d:now.toISOString().slice(0,10),
+           acc:[], exp:[], amt:[], items:[], plans:[], hist:[]};
+let chart;
+
+const sum = (a,f) => a.reduce((s,x) => s + (+f(x) || 0), 0);
+const fmt = n => (n<0?'-':'') + '$' + Math.abs(+n||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+const esc = s => String(s??'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+const cls = n => n<0 ? 'neg' : 'pos';
+const due = a => (+a.credit_limit||0) - (+a.available||0);
+
+// ---------- auth ----------
+const $ = id => document.getElementById(id);
+async function login(){ const {error}=await sb.auth.signInWithPassword({email:$('em').value,password:$('pw').value}); if(error)$('msg').textContent=error.message; }
+async function signup(){ const {error}=await sb.auth.signUp({email:$('em').value,password:$('pw').value}); $('msg').textContent=error?error.message:'Account created. Check your email if confirmation is on, then sign in.'; }
+sb.auth.onAuthStateChange((_,s)=>{ $('auth').hidden=!!s; $('app').hidden=!s; if(s) load(); });
+
+// ---------- data ----------
+async function all(t, f=q=>q){ let r=[],i=0; for(;;){ const {data,error}=await f(sb.from(t).select('*')).range(i,i+999); if(error)throw error; r=r.concat(data); if(data.length<1000)return r; i+=1000; } }
+async function load(){
+  try{
+    [S.acc,S.exp,S.amt,S.items,S.plans,S.hist] = await Promise.all([
+      all('accounts',q=>q.order('created_at')), all('expenses',q=>q.order('created_at')),
+      all('expense_amounts',q=>q.eq('year',S.y).order('id')), all('cashflow_items',q=>q.eq('year',S.y).order('id')),
+      all('month_plans',q=>q.eq('year',S.y).order('id')), all('balance_history',q=>q.order('date')) ]);
+  }catch(e){ return alert(e.message); }
+  render();
+}
+async function run(p){ const {error}=await p; if(error) return alert(error.message); await load(); }
+const upd = (t,id,f,v) => run(sb.from(t).update({[f]: ['name','label'].includes(f) ? v : (+v||0)}).eq('id',id));
+const add = (t,row) => run(sb.from(t).insert(row));
+const del = (t,id) => confirm('Delete this?') && run(sb.from(t).delete().eq('id',id));
+const num = (t,id,f,v) => `<input type="number" step="0.01" value="${v??0}" onchange="upd('${t}','${id}','${f}',this.value)">`;
+const txt = (t,id,f,v,c='nm') => `<input class="${c}" value="${esc(v)}" onchange="upd('${t}','${id}','${f}',this.value)">`;
+
+// ---------- shared: account list + add form ----------
+function accBlock(kinds, title){
+  const rows = S.acc.filter(a => kinds.includes(a.kind));
+  const body = rows.map(a => `<div class="row">${txt('accounts',a.id,'name',a.name)}
+    ${a.kind==='credit'
+      ? `<label>Limit${num('accounts',a.id,'credit_limit',a.credit_limit)}</label><label>Available${num('accounts',a.id,'available',a.available)}</label><b class="neg">${fmt(due(a))}</b>`
+      : `<label>${a.kind==='loan'?'Owed':'Balance'}${num('accounts',a.id,'balance',a.balance)}</label>`}
+    <button class="x" onclick="del('accounts','${a.id}')">✕</button></div>`).join('') || '<p class="mut">Nothing yet.</p>';
+  const k = kinds.length>1 ? `<select name="k">${kinds.map(x=>`<option>${x}</option>`).join('')}</select>` : `<input type="hidden" name="k" value="${kinds[0]}">`;
+  return `<section class="card"><h3>${title}</h3>${body}
+    <form onsubmit="event.preventDefault();add('accounts',{name:this.n.value,kind:this.k.value})"><input name="n" placeholder="Add account name" required>${k}<button class="pri">Add</button></form></section>`;
+}
+
+// ---------- pages ----------
+function cashPage(){
+  const {y,m}=S, cash=S.acc.filter(a=>a.kind==='cash'), cards=S.acc.filter(a=>a.kind==='credit');
+  const assets=sum(cash,a=>a.balance), cardDue=sum(cards,due);
+  const its=S.items.filter(i=>i.month===m), inc=sum(its.filter(i=>i.kind==='income'),i=>i.amount), misc=sum(its.filter(i=>i.kind==='expense'),i=>i.amount);
+  const rec=sum(S.amt.filter(a=>a.month===m),a=>a.amount), exp=rec+misc, end=assets+inc-cardDue-exp;
+  const p=S.plans.find(p=>p.month===m)||{plan_expenses:0,plan_savings:0};
+  const spend=exp+cardDue, saved=inc-spend;
+  const plan=(f,v)=>`<input type="number" step="0.01" value="${v}" onchange="setPlan('${f}',this.value)">`;
+  return `<div class="bar"><button onclick="shift(-1)">‹</button><h2 style="margin:0">${MN[m-1]} ${y}</h2><button onclick="shift(1)">›</button></div>
+  <div class="grid">
+    <section class="card"><h3>Projected end of month</h3><div class="stat ${cls(end)}">${fmt(end)}</div>
+      <div class="sum"><span>Total assets (cash)</span><span>${fmt(assets)}</span></div>
+      <div class="sum"><span>+ Expected income</span><span class="pos">${fmt(inc)}</span></div>
+      <div class="sum"><span>− Credit card due</span><span class="neg">${fmt(cardDue)}</span></div>
+      <div class="sum"><span>− Recurring expenses</span><span class="neg">${fmt(rec)}</span></div>
+      <div class="sum"><span>− Misc expenses</span><span class="neg">${fmt(misc)}</span></div></section>
+    <section class="card"><h3>Plan vs actual</h3>
+      <div class="row"><span class="nm">Spending plan</span>${plan('plan_expenses',p.plan_expenses)}</div>
+      <div class="sum"><span>Actual spending</span><span>${fmt(spend)}</span></div>
+      <div class="sum t"><span>Plan − actual</span><span class="${cls(p.plan_expenses-spend)}">${fmt(p.plan_expenses-spend)}</span></div>
+      <div class="row"><span class="nm">Savings goal</span>${plan('plan_savings',p.plan_savings)}</div>
+      <div class="sum"><span>Actual saved</span><span>${fmt(saved)}</span></div>
+      <div class="sum t"><span>Actual − goal</span><span class="${cls(saved-p.plan_savings)}">${fmt(saved-p.plan_savings)}</span></div></section>
+  </div>
+  <section class="card"><h3>${MN[m-1]} income &amp; misc items</h3>
+    ${its.map(i=>`<div class="row">${txt('cashflow_items',i.id,'label',i.label)}<span class="mut">${i.kind}</span>${num('cashflow_items',i.id,'amount',i.amount)}<button class="x" onclick="del('cashflow_items','${i.id}')">✕</button></div>`).join('')||'<p class="mut">Add expected income or one-off items.</p>'}
+    <form onsubmit="event.preventDefault();add('cashflow_items',{year:S.y,month:S.m,kind:this.k.value,label:this.l.value,amount:+this.a.value||0})">
+      <input name="l" placeholder="Label (e.g. Salary, Ski trip)" required><select name="k"><option>income</option><option>expense</option></select>
+      <input name="a" type="number" step="0.01" placeholder="Amount" style="width:110px"><button class="pri">Add</button></form></section>
+  ${accBlock(['cash'],'Bank accounts (enter balances)')}${accBlock(['credit'],'Credit cards (due = limit − available)')}`;
+}
+const shift = d => { S.m+=d; if(S.m>12){S.m=1;S.y++} if(S.m<1){S.m=12;S.y--} load(); };
+const setPlan = (f,v) => run(sb.from('month_plans').upsert({year:S.y,month:S.m,[f]:+v||0},{onConflict:'user_id,year,month'}));
+
+function expPage(){
+  const A={}; S.amt.forEach(a=>A[a.expense_id+'|'+a.month]=a.amount);
+  const mt=m=>sum(S.exp,e=>A[e.id+'|'+m]);
+  return `<div class="bar"><button onclick="S.y--;load()">‹</button><h2 style="margin:0">Expenses ${S.y}</h2><button onclick="S.y++;load()">›</button></div>
+  <section class="card scroll"><table><thead><tr><th></th>${MN.map(m=>`<th>${m}</th>`).join('')}<th>Year</th><th></th></tr></thead><tbody>
+  ${S.exp.map(e=>`<tr><td><input class="en" value="${esc(e.name)}" onchange="upd('expenses','${e.id}','name',this.value)"></td>
+    ${MN.map((_,i)=>`<td><input type="number" step="0.01" value="${A[e.id+'|'+(i+1)]??''}" onchange="setAmt('${e.id}',${i+1},this.value)"></td>`).join('')}
+    <td><b>${fmt(sum(MN,(_,)=>0)+sum(MN.map((_,i)=>A[e.id+'|'+(i+1)]||0),x=>x))}</b></td><td><button class="x" onclick="del('expenses','${e.id}')">✕</button></td></tr>`).join('')}
+  </tbody><tfoot><tr><td>Total</td>${MN.map((_,i)=>`<td>${fmt(mt(i+1))}</td>`).join('')}<td>${fmt(sum(MN,(_,)=>0)+sum(MN.map((_,i)=>mt(i+1)),x=>x))}</td><td></td></tr></tfoot></table>
+  <form onsubmit="event.preventDefault();add('expenses',{name:this.n.value})"><input name="n" placeholder="New recurring expense (e.g. Mortgage)" required><button class="pri">Add</button></form></section>
+  <p class="mut">Amounts here feed the Cash Flow page for the matching month.</p>`;
+}
+const setAmt = (id,m,v) => run(sb.from('expense_amounts').upsert({expense_id:id,year:S.y,month:m,amount:+v||0},{onConflict:'expense_id,year,month'}));
+
+function invPage(){
+  const inv=S.acc.filter(a=>a.kind==='investment');
+  setTimeout(drawChart,0);
+  return `<h2>Investing</h2><section class="card"><h3>History</h3><div style="height:280px"><canvas id="ch"></canvas></div></section>
+  <section class="card"><div class="bar"><h3 style="margin:0">Enter values for</h3><input type="date" value="${S.d}" onchange="S.d=this.value"></div>
+  ${inv.map(a=>`<div class="row">${txt('accounts',a.id,'name',a.name)}<label>Latest<b>${fmt(a.balance)}</b></label>
+    <label>New value<input type="number" step="0.01" placeholder="0.00" onchange="saveVal('${a.id}',this.value)" style="width:120px"></label>
+    <button class="x" onclick="del('accounts','${a.id}')">✕</button></div>`).join('')||'<p class="mut">Add your investment accounts below.</p>'}
+  <div class="sum t"><span>Total</span><span>${fmt(sum(inv,a=>a.balance))}</span></div>
+  <form onsubmit="event.preventDefault();add('accounts',{name:this.n.value,kind:'investment'})"><input name="n" placeholder="Add investment account" required><button class="pri">Add</button></form></section>`;
+}
+async function saveVal(id,v){
+  if(v==='') return;
+  const {error}=await sb.from('balance_history').upsert({account_id:id,date:S.d,balance:+v},{onConflict:'account_id,date'});
+  if(error) return alert(error.message);
+  const last=S.hist.filter(h=>h.account_id===id).reduce((m,h)=>h.date>m?h.date:m,'');
+  if(S.d>=last) await sb.from('accounts').update({balance:+v}).eq('id',id);
+  load();
+}
+function drawChart(){
+  const el=$('ch'); if(!el) return;
+  const ids=new Set(S.acc.filter(a=>a.kind==='investment').map(a=>a.id)), H=S.hist.filter(h=>ids.has(h.account_id));
+  const dates=[...new Set(H.map(h=>h.date))].sort(), by={}; H.forEach(h=>(by[h.date]??=[]).push(h));
+  const last={}, data=dates.map(d=>{ by[d].forEach(h=>last[h.account_id]=+h.balance); return sum(Object.values(last),x=>x); });
+  chart?.destroy();
+  chart=new Chart(el,{type:'line',data:{labels:dates,datasets:[{data,borderColor:'#4f8cff',backgroundColor:'rgba(79,140,255,.15)',fill:true,pointRadius:0,tension:.25}]},
+    options:{maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#8b97b0',maxTicksLimit:6},grid:{display:false}},y:{ticks:{color:'#8b97b0'},grid:{color:'#243049'}}}}});
+}
+
+function netPage(){
+  const g=k=>S.acc.filter(a=>a.kind===k), cash=sum(g('cash'),a=>a.balance), inv=sum(g('investment'),a=>a.balance), oth=sum(g('asset'),a=>a.balance);
+  const cc=sum(g('credit'),due), loan=sum(g('loan'),a=>a.balance), A=cash+inv+oth, D=cc+loan;
+  return `<h2>Net worth</h2><section class="card"><div class="stat ${cls(A-D)}">${fmt(A-D)}</div><div class="mut">Assets ${fmt(A)} − Debts ${fmt(D)}</div></section>
+  <div class="grid"><section class="card"><h3>Assets</h3>
+    <div class="sum"><span>Bank accounts</span><span>${fmt(cash)}</span></div><div class="sum"><span>Investments</span><span>${fmt(inv)}</span></div>
+    ${g('asset').map(a=>`<div class="sum"><span>${esc(a.name)}</span><span>${fmt(a.balance)}</span></div>`).join('')}
+    <div class="sum t"><span>Total assets</span><span class="pos">${fmt(A)}</span></div></section>
+  <section class="card"><h3>Debts</h3>
+    <div class="sum"><span>Credit cards</span><span>${fmt(cc)}</span></div>
+    ${g('loan').map(a=>`<div class="sum"><span>${esc(a.name)}</span><span>${fmt(a.balance)}</span></div>`).join('')}
+    <div class="sum t"><span>Total debts</span><span class="neg">${fmt(D)}</span></div></section></div>
+  ${accBlock(['asset','loan'],'Other assets (home, car…) &amp; loans (mortgage…)')}`;
+}
+
+// ---------- shell ----------
+const TABS={cash:['Cash flow',cashPage],exp:['Expenses',expPage],inv:['Investing',invPage],net:['Net worth',netPage]};
+function render(){
+  $('nav').innerHTML=Object.entries(TABS).map(([k,[n]])=>`<button class="${k===S.tab?'on':''}" onclick="S.tab='${k}';render()">${n}</button>`).join('')+`<button onclick="sb.auth.signOut()">Sign out</button>`;
+  $('v').innerHTML=TABS[S.tab][1]();
+}
+sb.auth.getSession().then(({data})=>{ $('auth').hidden=!!data.session; $('app').hidden=!data.session; });
+</script></body></html>
