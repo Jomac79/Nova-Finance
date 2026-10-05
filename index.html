@@ -26,6 +26,8 @@ form{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}form input[name=n],form
 .bar{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:8px}
 .scroll{overflow-x:auto}table{border-collapse:collapse;width:100%}td,th{padding:4px;white-space:nowrap;font-size:13px}th{color:var(--mut);font-weight:600}
 td input[type=number]{width:74px;padding:6px}td input.en{width:150px}tfoot td{font-weight:700;border-top:1px solid var(--line)}
+td.sticky,th.sticky{position:sticky;left:0;background:var(--card);z-index:1}td input.ov{border-color:var(--ac)}.sm td{border-top:1px solid var(--line);font-weight:600;text-align:right}.sm td:first-child{text-align:left}
+nav{overflow-x:auto}nav button{white-space:nowrap}
 #auth{max-width:340px;margin:12vh auto;padding:16px}#auth input{width:100%;margin-bottom:10px}
 </style></head><body>
 <div id="auth" hidden>
@@ -39,22 +41,20 @@ td input[type=number]{width:74px;padding:6px}td input.en{width:150px}tfoot td{fo
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="config.js"></script>
 <script>
-// ====== 1) PASTE YOUR SUPABASE VALUES (Project Settings > API) ======
-const SUPABASE_URL = 'https://ocfgkfiwrgupifqgkifq.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_OTqz8YJkiBbsB_UcCfcWYA_j8-zCNgZ';
-// ====================================================================
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const MN = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const now = new Date();
 const S = {tab:'cash', y:now.getFullYear(), m:now.getMonth()+1, d:now.toISOString().slice(0,10),
-           acc:[], exp:[], amt:[], items:[], plans:[], hist:[]};
+           acc:[], exp:[], amt:[], items:[], plans:[], hist:[], lines:[], cells:[], py:[], pm:'plan'};
 let chart;
 
 const sum = (a,f) => a.reduce((s,x) => s + (+f(x) || 0), 0);
 const fmt = n => (n<0?'-':'') + '$' + Math.abs(+n||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 const esc = s => String(s??'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
 const cls = n => n<0 ? 'neg' : 'pos';
+const fmt0 = n => (n<0?'-':'') + '$' + Math.round(Math.abs(+n||0)).toLocaleString();
 const due = a => (+a.credit_limit||0) - (+a.available||0);
 
 // ---------- auth ----------
@@ -67,10 +67,11 @@ sb.auth.onAuthStateChange((_,s)=>{ $('auth').hidden=!!s; $('app').hidden=!s; if(
 async function all(t, f=q=>q){ let r=[],i=0; for(;;){ const {data,error}=await f(sb.from(t).select('*')).range(i,i+999); if(error)throw error; r=r.concat(data); if(data.length<1000)return r; i+=1000; } }
 async function load(){
   try{
-    [S.acc,S.exp,S.amt,S.items,S.plans,S.hist] = await Promise.all([
+    [S.acc,S.exp,S.amt,S.items,S.plans,S.hist,S.lines,S.cells,S.py] = await Promise.all([
       all('accounts',q=>q.order('created_at')), all('expenses',q=>q.order('created_at')),
       all('expense_amounts',q=>q.eq('year',S.y).order('id')), all('cashflow_items',q=>q.eq('year',S.y).order('id')),
-      all('month_plans',q=>q.eq('year',S.y).order('id')), all('balance_history',q=>q.order('date')) ]);
+      all('month_plans',q=>q.eq('year',S.y).order('id')), all('balance_history',q=>q.order('date')),
+      all('plan_lines',q=>q.order('created_at')), all('plan_cells',q=>q.eq('year',S.y).order('id')), all('plan_years',q=>q.order('id')) ]);
   }catch(e){ return alert(e.message); }
   render();
 }
@@ -187,8 +188,63 @@ function netPage(){
   ${accBlock(['asset','loan'],'Other assets (home, car…) &amp; loans (mortgage…)')}`;
 }
 
+
+// ---------- year plan ----------
+function planPage(){
+  const y=S.y, mo=[1,2,3,4,5,6,7,8,9,10,11,12], cur=y===now.getFullYear();
+  const C={}; S.cells.forEach(c=>C[c.line_id+'|'+c.month]=c);
+  const ET={}; mo.forEach(m=>ET[m]=sum(S.amt.filter(a=>a.month===m),a=>a.amount));
+  const pl=(l,m)=>{const c=C[l.id+'|'+m]; return c&&c.planned!=null?+c.planned:+l.default_amount};
+  const ac=(l,m)=>{ if(l.from_expenses) return ET[m]>0?ET[m]:null; const c=C[l.id+'|'+m]; return c&&c.actual!=null?+c.actual:null };
+  const ef=(l,m)=>ac(l,m)??pl(l,m);
+  const inc=S.lines.filter(l=>l.kind==='income'), exp=S.lines.filter(l=>l.kind==='expense');
+  const T=(ls,f,m)=>sum(ls,l=>f(l,m));
+  const P=S.py.find(p=>p.year===y), cashNow=sum(S.acc.filter(a=>a.kind==='cash'),a=>a.balance);
+  const hasOpen=P&&P.opening!=null, anchor=hasOpen?1:(cur?now.getMonth()+1:null);
+  let pb=hasOpen?+P.opening:cashNow, eb=pb; const PN={},EN={},pE={},eE={};
+  mo.forEach(m=>{ PN[m]=T(inc,pl,m)-T(exp,pl,m); EN[m]=T(inc,ef,m)-T(exp,ef,m);
+    if(anchor!=null&&m>=anchor){ pb+=PN[m]; eb+=EN[m]; pE[m]=pb; eE[m]=eb; } });
+  const yr=o=>sum(mo,m=>o[m]), bal=(o,m)=>o[m]==null?'<span class="mut">—</span>':`<span class="${cls(o[m])}">${fmt0(o[m])}</span>`;
+  const cellIn=(l,m)=>{ const c=C[l.id+'|'+m];
+    if(S.pm==='plan') return `<td><input class="${c&&c.planned!=null?'ov':''}" type="number" step="0.01" value="${pl(l,m)}" onchange="setCell('${l.id}',${m},'planned',this.value)"></td>`;
+    if(l.from_expenses) return `<td class="mut" style="text-align:right">${ET[m]>0?fmt0(ET[m]):'—'}</td>`;
+    const a=ac(l,m); return `<td><input type="number" step="0.01" value="${a??''}" placeholder="${pl(l,m)}" onchange="setCell('${l.id}',${m},'actual',this.value)"></td>`; };
+  const row=l=>`<tr><td class="sticky"><input class="en" value="${esc(l.name)}" onchange="upd('plan_lines','${l.id}','name',this.value)">${l.from_expenses?' 🔗':''}</td>
+    <td><input type="number" step="0.01" value="${l.default_amount}" onchange="upd('plan_lines','${l.id}','default_amount',this.value)"></td>
+    ${mo.map(m=>cellIn(l,m)).join('')}<td><b>${fmt0(S.pm==='plan'?sum(mo,m=>pl(l,m)):sum(mo,m=>ac(l,m)))}</b></td><td><button class="x" onclick="del('plan_lines','${l.id}')">✕</button></td></tr>`;
+  const sec=(t,ls)=>`<tr><td class="sticky"><b>${t}</b></td><td colspan="15"></td></tr>${ls.map(row).join('')}`;
+  const srow=(t,f,tot)=>`<tr class="sm"><td class="sticky">${t}</td><td></td>${mo.map(m=>`<td>${f(m)}</td>`).join('')}<td>${tot}</td><td></td></tr>`;
+  const net=o=>m=>`<span class="${cls(o[m])}">${fmt0(o[m])}</span>`;
+  const tn=o=>`<span class="${cls(yr(o))}">${fmt0(yr(o))}</span>`;
+  const vr=m=>`<span class="${cls(EN[m]-PN[m])}">${fmt0(EN[m]-PN[m])}</span>`;
+  const seg=(k,t)=>`<button class="${S.pm===k?'pri':''}" onclick="S.pm='${k}';render()">${t}</button>`;
+  return `<div class="bar"><button onclick="S.y--;load()">‹</button><h2 style="margin:0">Year plan ${y}</h2><button onclick="S.y++;load()">›</button></div>
+  <div class="grid">
+    <section class="card"><h3>Planned net for the year</h3><div class="stat ${cls(yr(PN))}">${fmt0(yr(PN))}</div></section>
+    <section class="card"><h3>Projected net (actuals where entered)</h3><div class="stat ${cls(yr(EN))}">${fmt0(yr(EN))}</div><div class="mut">vs plan: <span class="${cls(yr(EN)-yr(PN))}">${fmt0(yr(EN)-yr(PN))}</span></div></section>
+    <section class="card"><h3>Projected balance, end of ${y}</h3><div class="stat">${bal(eE,12)}</div>
+      <div class="mut">Starting balance: <input type="number" step="0.01" style="width:120px" value="${hasOpen?P.opening:''}" placeholder="${cur?cashNow:'enter'}" onchange="setOpening(this.value)"><br>${cur?'Blank = your current bank balances, from this month on.':'Enter the balance at the start of the year to see balances.'}</div></section>
+  </div>
+  <section class="card"><div class="bar"><div>${seg('plan','Edit plan')} ${seg('actual','Enter actuals')}</div>
+    <span class="mut">${S.pm==='plan'?'Blue border = changed for that month only. Edit “Every month” to change all other months.':'Grey number = planned. Type the real amount; 🔗 rows pull from the Expenses page.'}</span></div>
+  ${S.lines.length?`<div class="scroll"><table><thead><tr><th class="sticky"></th><th>Every month</th>${MN.map(n=>`<th>${n}</th>`).join('')}<th>${S.pm==='plan'?'Plan':'Actual'} year</th><th></th></tr></thead><tbody>
+    ${sec('Income',inc)}${sec('Expenses',exp)}
+    ${srow('Planned net',net(PN),tn(PN))}${srow('Planned end balance',m=>bal(pE,m),bal(pE,12))}
+    ${srow('Projected net',net(EN),tn(EN))}${srow('Projected end balance',m=>bal(eE,m),bal(eE,12))}
+    ${srow('Projected − planned',vr,`<span class="${cls(yr(EN)-yr(PN))}">${fmt0(yr(EN)-yr(PN))}</span>`)}
+  </tbody></table></div>`:`<p class="mut">No lines yet. <button class="pri" onclick="addStarter()">Add starter lines</button> (Salary, Rent received, Bills, Entertainment) or add your own below.</p>`}
+  <form onsubmit="event.preventDefault();add('plan_lines',{name:this.n.value,kind:this.k.value,default_amount:+this.a.value||0,from_expenses:this.f.checked})">
+    <input name="n" placeholder="Add a line (e.g. Salary, Vacation)" required><select name="k"><option>expense</option><option>income</option></select>
+    <input name="a" type="number" step="0.01" placeholder="Every month" style="width:110px">
+    <label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="f"> actuals from Expenses page</label><button class="pri">Add</button></form>
+  <p class="mut">One-off items like a vacation: add a line with 0 every month, then enter an amount only in the month it happens.</p></section>`;
+}
+const setCell=(id,m,f,v)=>run(sb.from('plan_cells').upsert({line_id:id,year:S.y,month:m,[f]:v===''?null:+v},{onConflict:'line_id,year,month'}));
+const setOpening=v=>run(sb.from('plan_years').upsert({year:S.y,opening:v===''?null:+v},{onConflict:'user_id,year'}));
+const addStarter=()=>run(sb.from('plan_lines').insert([{name:'Salary',kind:'income'},{name:'Rent received',kind:'income'},{name:'Bills',kind:'expense',from_expenses:true},{name:'Entertainment',kind:'expense'}]));
+
 // ---------- shell ----------
-const TABS={cash:['Cash flow',cashPage],exp:['Expenses',expPage],inv:['Investing',invPage],net:['Net worth',netPage]};
+const TABS={cash:['Cash flow',cashPage],plan:['Year plan',planPage],exp:['Expenses',expPage],inv:['Investing',invPage],net:['Net worth',netPage]};
 function render(){
   $('nav').innerHTML=Object.entries(TABS).map(([k,[n]])=>`<button class="${k===S.tab?'on':''}" onclick="S.tab='${k}';render()">${n}</button>`).join('')+`<button onclick="sb.auth.signOut()">Sign out</button>`;
   $('v').innerHTML=TABS[S.tab][1]();
