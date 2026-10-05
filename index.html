@@ -55,6 +55,7 @@ const fmt = n => (n<0?'-':'') + '$' + Math.abs(+n||0).toLocaleString(undefined,{
 const esc = s => String(s??'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
 const cls = n => n<0 ? 'neg' : 'pos';
 const fmt0 = n => (n<0?'-':'') + '$' + Math.round(Math.abs(+n||0)).toLocaleString();
+const assetsNow = () => { const cash=sum(S.acc.filter(a=>a.kind==='cash'),a=>a.balance), inv=sum(S.acc.filter(a=>a.kind==='investment'),a=>a.balance); return {cash,inv,tot:cash+inv}; };
 const due = a => (+a.credit_limit||0) - (+a.available||0);
 
 // ---------- auth ----------
@@ -98,16 +99,19 @@ function accBlock(kinds, title){
 // ---------- pages ----------
 function cashPage(){
   const {y,m}=S, cash=S.acc.filter(a=>a.kind==='cash'), cards=S.acc.filter(a=>a.kind==='credit');
-  const assets=sum(cash,a=>a.balance), cardDue=sum(cards,due);
+  const A=assetsNow(), cardDue=sum(cards,due);
   const its=S.items.filter(i=>i.month===m), inc=sum(its.filter(i=>i.kind==='income'),i=>i.amount), misc=sum(its.filter(i=>i.kind==='expense'),i=>i.amount);
-  const rec=sum(S.amt.filter(a=>a.month===m),a=>a.amount), exp=rec+misc, end=assets+inc-cardDue-exp;
+  const rec=sum(S.amt.filter(a=>a.month===m),a=>a.amount), exp=rec+misc, end=A.cash+inc-cardDue-exp, endTot=end+A.inv;
   const p=S.plans.find(p=>p.month===m)||{plan_expenses:0,plan_savings:0};
   const spend=exp+cardDue, saved=inc-spend;
   const plan=(f,v)=>`<input type="number" step="0.01" value="${v}" onchange="setPlan('${f}',this.value)">`;
   return `<div class="bar"><button onclick="shift(-1)">‹</button><h2 style="margin:0">${MN[m-1]} ${y}</h2><button onclick="shift(1)">›</button></div>
   <div class="grid">
-    <section class="card"><h3>Projected end of month</h3><div class="stat ${cls(end)}">${fmt(end)}</div>
-      <div class="sum"><span>Total assets (cash)</span><span>${fmt(assets)}</span></div>
+    <section class="card"><h3>Projected total assets, end of month</h3><div class="stat ${cls(endTot)}">${fmt(endTot)}</div>
+      <div class="mut">Cash ${fmt(end)} + investments ${fmt(A.inv)}</div>
+      <div class="sum"><span>Cash (bank accounts, entered below)</span><span>${fmt(A.cash)}</span></div>
+      <div class="sum"><span>Investments (from Investing page)</span><span>${fmt(A.inv)}</span></div>
+      <div class="sum t"><span>Total assets today</span><span>${fmt(A.tot)}</span></div>
       <div class="sum"><span>+ Expected income</span><span class="pos">${fmt(inc)}</span></div>
       <div class="sum"><span>− Credit card due</span><span class="neg">${fmt(cardDue)}</span></div>
       <div class="sum"><span>− Recurring expenses</span><span class="neg">${fmt(rec)}</span></div>
@@ -199,9 +203,9 @@ function planPage(){
   const ef=(l,m)=>ac(l,m)??pl(l,m);
   const inc=S.lines.filter(l=>l.kind==='income'), exp=S.lines.filter(l=>l.kind==='expense');
   const T=(ls,f,m)=>sum(ls,l=>f(l,m));
-  const P=S.py.find(p=>p.year===y), cashNow=sum(S.acc.filter(a=>a.kind==='cash'),a=>a.balance);
-  const hasOpen=P&&P.opening!=null, anchor=hasOpen?1:(cur?now.getMonth()+1:null);
-  let pb=hasOpen?+P.opening:cashNow, eb=pb; const PN={},EN={},pE={},eE={};
+  const A=assetsNow();
+  const anchor=cur?now.getMonth()+1:null;
+  let pb=A.cash, eb=A.cash; const PN={},EN={},pE={},eE={};
   mo.forEach(m=>{ PN[m]=T(inc,pl,m)-T(exp,pl,m); EN[m]=T(inc,ef,m)-T(exp,ef,m);
     if(anchor!=null&&m>=anchor){ pb+=PN[m]; eb+=EN[m]; pE[m]=pb; eE[m]=eb; } });
   const yr=o=>sum(mo,m=>o[m]), bal=(o,m)=>o[m]==null?'<span class="mut">—</span>':`<span class="${cls(o[m])}">${fmt0(o[m])}</span>`;
@@ -222,15 +226,19 @@ function planPage(){
   <div class="grid">
     <section class="card"><h3>Planned net for the year</h3><div class="stat ${cls(yr(PN))}">${fmt0(yr(PN))}</div></section>
     <section class="card"><h3>Projected net (actuals where entered)</h3><div class="stat ${cls(yr(EN))}">${fmt0(yr(EN))}</div><div class="mut">vs plan: <span class="${cls(yr(EN)-yr(PN))}">${fmt0(yr(EN)-yr(PN))}</span></div></section>
-    <section class="card"><h3>Projected balance, end of ${y}</h3><div class="stat">${bal(eE,12)}</div>
-      <div class="mut">Starting balance: <input type="number" step="0.01" style="width:120px" value="${hasOpen?P.opening:''}" placeholder="${cur?cashNow:'enter'}" onchange="setOpening(this.value)"><br>${cur?'Blank = your current bank balances, from this month on.':'Enter the balance at the start of the year to see balances.'}</div></section>
+    <section class="card"><h3>Assets today</h3><div class="stat">${fmt0(A.tot)}</div>
+      <div class="sum"><span>Cash (Cash flow page)</span><span>${fmt0(A.cash)}</span></div>
+      <div class="sum"><span>Investments (Investing page)</span><span>${fmt0(A.inv)}</span></div></section>
+    <section class="card"><h3>Projected total assets, end of ${y}</h3><div class="stat">${eE[12]==null?'<span class="mut">—</span>':fmt0(eE[12]+A.inv)}</div>
+      <div class="mut">${cur?`Cash ${eE[12]==null?'—':fmt0(eE[12])} + investments ${fmt0(A.inv)} (held at today’s value). Starts from your cash today, this month on.`:'Balances are projected for the current year only.'}</div></section>
   </div>
   <section class="card"><div class="bar"><div>${seg('plan','Edit plan')} ${seg('actual','Enter actuals')}</div>
     <span class="mut">${S.pm==='plan'?'Blue border = changed for that month only. Edit “Every month” to change all other months.':'Grey number = planned. Type the real amount; 🔗 rows pull from the Expenses page.'}</span></div>
   ${S.lines.length?`<div class="scroll"><table><thead><tr><th class="sticky"></th><th>Every month</th>${MN.map(n=>`<th>${n}</th>`).join('')}<th>${S.pm==='plan'?'Plan':'Actual'} year</th><th></th></tr></thead><tbody>
     ${sec('Income',inc)}${sec('Expenses',exp)}
-    ${srow('Planned net',net(PN),tn(PN))}${srow('Planned end balance',m=>bal(pE,m),bal(pE,12))}
-    ${srow('Projected net',net(EN),tn(EN))}${srow('Projected end balance',m=>bal(eE,m),bal(eE,12))}
+    ${srow('Planned net',net(PN),tn(PN))}${srow('Planned end cash',m=>bal(pE,m),bal(pE,12))}
+    ${srow('Projected net',net(EN),tn(EN))}${srow('Projected end cash',m=>bal(eE,m),bal(eE,12))}
+    ${srow('Projected total assets',m=>eE[m]==null?bal(eE,m):`<span class="${cls(eE[m]+A.inv)}">${fmt0(eE[m]+A.inv)}</span>`,eE[12]==null?bal(eE,12):fmt0(eE[12]+A.inv))}
     ${srow('Projected − planned',vr,`<span class="${cls(yr(EN)-yr(PN))}">${fmt0(yr(EN)-yr(PN))}</span>`)}
   </tbody></table></div>`:`<p class="mut">No lines yet. <button class="pri" onclick="addStarter()">Add starter lines</button> (Salary, Rent received, Bills, Entertainment) or add your own below.</p>`}
   <form onsubmit="event.preventDefault();add('plan_lines',{name:this.n.value,kind:this.k.value,default_amount:+this.a.value||0,from_expenses:this.f.checked})">
@@ -240,7 +248,6 @@ function planPage(){
   <p class="mut">One-off items like a vacation: add a line with 0 every month, then enter an amount only in the month it happens.</p></section>`;
 }
 const setCell=(id,m,f,v)=>run(sb.from('plan_cells').upsert({line_id:id,year:S.y,month:m,[f]:v===''?null:+v},{onConflict:'line_id,year,month'}));
-const setOpening=v=>run(sb.from('plan_years').upsert({year:S.y,opening:v===''?null:+v},{onConflict:'user_id,year'}));
 const addStarter=()=>run(sb.from('plan_lines').insert([{name:'Salary',kind:'income'},{name:'Rent received',kind:'income'},{name:'Bills',kind:'expense',from_expenses:true},{name:'Entertainment',kind:'expense'}]));
 
 // ---------- shell ----------
