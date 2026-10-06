@@ -102,7 +102,8 @@ function accBlock(kinds, title){
 
 // ---------- pages ----------
 function cashPage(){
-  const {y,m}=S, A=assetsNow(), cardDue=sum(S.acc.filter(a=>a.kind==='credit'),due);
+  const {y,m}=S, A=assetsNow(), isCur=y===now.getFullYear()&&m===now.getMonth()+1;
+  const cardDue=isCur?sum(S.acc.filter(a=>a.kind==='credit'),due):0;  // card balances are only known for the current month
   const {ET,pl,ef,inc,exp}=planData();
   const its=S.items.filter(i=>i.month===m), mInc=sum(its.filter(i=>i.kind==='income'),i=>i.amount), mExp=sum(its.filter(i=>i.kind==='expense'),i=>i.amount);
   const pInc=sum(inc,l=>pl(l,m)), pExp=sum(exp,l=>pl(l,m)), pNet=pInc-pExp;
@@ -125,7 +126,7 @@ function cashPage(){
     <table class="cmp"><thead><tr><th></th><th>Plan</th><th>Actual</th><th>Diff (+ is better)</th></tr></thead><tbody>
       ${r('Income',pInc,aInc,aInc-pInc)}
       ${r('Expenses',pExp,aExp,pExp-aExp)}
-      ${sub('Recurring (Expenses page)',rec)}${sub('Credit card due',cardDue)}${sub('Misc items',mExp)}
+      ${sub('Recurring (Expenses page)',rec)}${sub('Credit card due'+(isCur?'':' (current month only)'),cardDue)}${sub('Misc items',mExp)}
       ${r('Net for the month',pNet,aNet,aNet-pNet,1)}
       ${r('End of month: cash',pEnd,aEnd,aEnd-pEnd)}
       ${r('End of month: total assets',pEnd+A.inv,aEnd+A.inv,aEnd-pEnd,1)}
