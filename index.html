@@ -28,6 +28,7 @@ form{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}form input[name=n],form
 td input[type=number]{width:74px;padding:6px}td input.en{width:150px}tfoot td{font-weight:700;border-top:1px solid var(--line)}
 td.sticky,th.sticky{position:sticky;left:0;background:var(--card);z-index:1}td input.ov{border-color:var(--ac)}.sm td{border-top:1px solid var(--line);font-weight:600;text-align:right}.sm td:first-child{text-align:left}
 nav{overflow-x:auto}nav button{white-space:nowrap}
+.cmp td+td,.cmp th+th{text-align:right}.cmp td.sub{color:var(--mut);padding-left:18px;font-size:12px}.cmp tr.t td{border-top:1px solid var(--line);font-weight:700}
 #auth{max-width:340px;margin:12vh auto;padding:16px}#auth input{width:100%;margin-bottom:10px}
 </style></head><body>
 <div id="auth" hidden>
@@ -56,6 +57,8 @@ const esc = s => String(s??'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').repl
 const cls = n => n<0 ? 'neg' : 'pos';
 const fmt0 = n => (n<0?'-':'') + '$' + Math.round(Math.abs(+n||0)).toLocaleString();
 const assetsNow = () => { const cash=sum(S.acc.filter(a=>a.kind==='cash'),a=>a.balance), inv=sum(S.acc.filter(a=>a.kind==='investment'),a=>a.balance); return {cash,inv,tot:cash+inv}; };
+const KL={cash:'Cash',credit:'Credit card',investment:'Investment',asset:'Other asset',loan:'Loan'};
+const kindSel = a => `<select onchange="upd('accounts','${a.id}','kind',this.value)" title="Account type">${Object.keys(KL).map(k=>`<option value="${k}"${k===a.kind?' selected':''}>${KL[k]}</option>`).join('')}</select>`;
 const due = a => (+a.credit_limit||0) - (+a.available||0);
 
 // ---------- auth ----------
@@ -77,7 +80,7 @@ async function load(){
   render();
 }
 async function run(p){ const {error}=await p; if(error) return alert(error.message); await load(); }
-const upd = (t,id,f,v) => run(sb.from(t).update({[f]: ['name','label'].includes(f) ? v : (+v||0)}).eq('id',id));
+const upd = (t,id,f,v) => run(sb.from(t).update({[f]: ['name','label','kind'].includes(f) ? v : (+v||0)}).eq('id',id));
 const add = (t,row) => run(sb.from(t).insert(row));
 const del = (t,id) => confirm('Delete this?') && run(sb.from(t).delete().eq('id',id));
 const num = (t,id,f,v) => `<input type="number" step="0.01" value="${v??0}" onchange="upd('${t}','${id}','${f}',this.value)">`;
@@ -90,7 +93,7 @@ function accBlock(kinds, title){
     ${a.kind==='credit'
       ? `<label>Limit${num('accounts',a.id,'credit_limit',a.credit_limit)}</label><label>Available${num('accounts',a.id,'available',a.available)}</label><b class="neg">${fmt(due(a))}</b>`
       : `<label>${a.kind==='loan'?'Owed':'Balance'}${num('accounts',a.id,'balance',a.balance)}</label>`}
-    <button class="x" onclick="del('accounts','${a.id}')">✕</button></div>`).join('') || '<p class="mut">Nothing yet.</p>';
+    ${kindSel(a)}<button class="x" onclick="del('accounts','${a.id}')">✕</button></div>`).join('') || '<p class="mut">Nothing yet.</p>';
   const k = kinds.length>1 ? `<select name="k">${kinds.map(x=>`<option>${x}</option>`).join('')}</select>` : `<input type="hidden" name="k" value="${kinds[0]}">`;
   return `<section class="card"><h3>${title}</h3>${body}
     <form onsubmit="event.preventDefault();add('accounts',{name:this.n.value,kind:this.k.value})"><input name="n" placeholder="Add account name" required>${k}<button class="pri">Add</button></form></section>`;
@@ -98,41 +101,43 @@ function accBlock(kinds, title){
 
 // ---------- pages ----------
 function cashPage(){
-  const {y,m}=S, cash=S.acc.filter(a=>a.kind==='cash'), cards=S.acc.filter(a=>a.kind==='credit');
-  const A=assetsNow(), cardDue=sum(cards,due);
-  const its=S.items.filter(i=>i.month===m), inc=sum(its.filter(i=>i.kind==='income'),i=>i.amount), misc=sum(its.filter(i=>i.kind==='expense'),i=>i.amount);
-  const rec=sum(S.amt.filter(a=>a.month===m),a=>a.amount), exp=rec+misc, end=A.cash+inc-cardDue-exp, endTot=end+A.inv;
-  const p=S.plans.find(p=>p.month===m)||{plan_expenses:0,plan_savings:0};
-  const spend=exp+cardDue, saved=inc-spend;
-  const plan=(f,v)=>`<input type="number" step="0.01" value="${v}" onchange="setPlan('${f}',this.value)">`;
+  const {y,m}=S, A=assetsNow(), cardDue=sum(S.acc.filter(a=>a.kind==='credit'),due);
+  const {ET,pl,ef,inc,exp}=planData();
+  const its=S.items.filter(i=>i.month===m), mInc=sum(its.filter(i=>i.kind==='income'),i=>i.amount), mExp=sum(its.filter(i=>i.kind==='expense'),i=>i.amount);
+  const pInc=sum(inc,l=>pl(l,m)), pExp=sum(exp,l=>pl(l,m)), pNet=pInc-pExp;
+  const rec=ET[m]||0, aInc=sum(inc,l=>ef(l,m))+mInc, aExp=rec+cardDue+mExp, aNet=aInc-aExp;
+  const pEnd=A.cash+pNet, aEnd=A.cash+aNet;
+  const d=(v,cls2='')=>`<td class="${cls(v)}">${fmt(v)}</td>`;
+  const r=(label,p,a,diff,t)=>`<tr class="${t?'t':''}"><td>${label}</td><td>${fmt(p)}</td><td>${fmt(a)}</td>${d(diff)}</tr>`;
+  const sub=(label,a)=>`<tr><td class="sub">${label}</td><td></td><td class="mut">${fmt(a)}</td><td></td></tr>`;
   return `<div class="bar"><button onclick="shift(-1)">‹</button><h2 style="margin:0">${MN[m-1]} ${y}</h2><button onclick="shift(1)">›</button></div>
   <div class="grid">
-    <section class="card"><h3>Projected total assets, end of month</h3><div class="stat ${cls(endTot)}">${fmt(endTot)}</div>
-      <div class="mut">Cash ${fmt(end)} + investments ${fmt(A.inv)}</div>
+    <section class="card"><h3>Today</h3><div class="stat">${fmt(A.tot)}</div><div class="mut">Total assets</div>
       <div class="sum"><span>Cash (bank accounts, entered below)</span><span>${fmt(A.cash)}</span></div>
-      <div class="sum"><span>Investments (from Investing page)</span><span>${fmt(A.inv)}</span></div>
-      <div class="sum t"><span>Total assets today</span><span>${fmt(A.tot)}</span></div>
-      <div class="sum"><span>+ Expected income</span><span class="pos">${fmt(inc)}</span></div>
-      <div class="sum"><span>− Credit card due</span><span class="neg">${fmt(cardDue)}</span></div>
-      <div class="sum"><span>− Recurring expenses</span><span class="neg">${fmt(rec)}</span></div>
-      <div class="sum"><span>− Misc expenses</span><span class="neg">${fmt(misc)}</span></div></section>
-    <section class="card"><h3>Plan vs actual</h3>
-      <div class="row"><span class="nm">Spending plan</span>${plan('plan_expenses',p.plan_expenses)}</div>
-      <div class="sum"><span>Actual spending</span><span>${fmt(spend)}</span></div>
-      <div class="sum t"><span>Plan − actual</span><span class="${cls(p.plan_expenses-spend)}">${fmt(p.plan_expenses-spend)}</span></div>
-      <div class="row"><span class="nm">Savings goal</span>${plan('plan_savings',p.plan_savings)}</div>
-      <div class="sum"><span>Actual saved</span><span>${fmt(saved)}</span></div>
-      <div class="sum t"><span>Actual − goal</span><span class="${cls(saved-p.plan_savings)}">${fmt(saved-p.plan_savings)}</span></div></section>
+      <div class="sum"><span>Investments (from Investing page)</span><span>${fmt(A.inv)}</span></div></section>
+    <section class="card"><h3>End of ${MN[m-1]}: total assets</h3>
+      <div class="sum"><span>Projected (Year plan)</span><b>${fmt(pEnd+A.inv)}</b></div>
+      <div class="sum"><span>Actual (what you entered)</span><b class="${cls(aEnd+A.inv)}">${fmt(aEnd+A.inv)}</b></div>
+      <div class="sum t"><span>Actual − projected</span><b class="${cls(aEnd-pEnd)}">${fmt(aEnd-pEnd)}</b></div></section>
   </div>
-  <section class="card"><h3>${MN[m-1]} income &amp; misc items</h3>
-    ${its.map(i=>`<div class="row">${txt('cashflow_items',i.id,'label',i.label)}<span class="mut">${i.kind}</span>${num('cashflow_items',i.id,'amount',i.amount)}<button class="x" onclick="del('cashflow_items','${i.id}')">✕</button></div>`).join('')||'<p class="mut">Add expected income or one-off items.</p>'}
+  <section class="card scroll"><h3>${MN[m-1]} plan vs actual</h3>
+    <table class="cmp"><thead><tr><th></th><th>Plan</th><th>Actual</th><th>Diff (+ is better)</th></tr></thead><tbody>
+      ${r('Income',pInc,aInc,aInc-pInc)}
+      ${r('Expenses',pExp,aExp,pExp-aExp)}
+      ${sub('Recurring (Expenses page)',rec)}${sub('Credit card due',cardDue)}${sub('Misc items',mExp)}
+      ${r('Net for the month',pNet,aNet,aNet-pNet,1)}
+      ${r('End of month: cash',pEnd,aEnd,aEnd-pEnd)}
+      ${r('End of month: total assets',pEnd+A.inv,aEnd+A.inv,aEnd-pEnd,1)}
+    </tbody></table>
+    <p class="mut">Plan comes from the Year plan tab. Income actual = Year plan actuals where entered (otherwise the plan) plus misc income. Expenses actual = Expenses page + credit card due + misc items. Investments are held at today’s value.</p></section>
+  <section class="card"><h3>${MN[m-1]} misc items</h3>
+    ${its.map(i=>`<div class="row">${txt('cashflow_items',i.id,'label',i.label)}<span class="mut">${i.kind}</span>${num('cashflow_items',i.id,'amount',i.amount)}<button class="x" onclick="del('cashflow_items','${i.id}')">✕</button></div>`).join('')||'<p class="mut">Add one-off income or expenses that actually happened this month.</p>'}
     <form onsubmit="event.preventDefault();add('cashflow_items',{year:S.y,month:S.m,kind:this.k.value,label:this.l.value,amount:+this.a.value||0})">
-      <input name="l" placeholder="Label (e.g. Salary, Ski trip)" required><select name="k"><option>income</option><option>expense</option></select>
+      <input name="l" placeholder="Label (e.g. Ski trip, Refund)" required><select name="k"><option>expense</option><option>income</option></select>
       <input name="a" type="number" step="0.01" placeholder="Amount" style="width:110px"><button class="pri">Add</button></form></section>
   ${accBlock(['cash'],'Bank accounts (enter balances)')}${accBlock(['credit'],'Credit cards (due = limit − available)')}`;
 }
 const shift = d => { S.m+=d; if(S.m>12){S.m=1;S.y++} if(S.m<1){S.m=12;S.y--} load(); };
-const setPlan = (f,v) => run(sb.from('month_plans').upsert({year:S.y,month:S.m,[f]:+v||0},{onConflict:'user_id,year,month'}));
 
 function expPage(){
   const A={}; S.amt.forEach(a=>A[a.expense_id+'|'+a.month]=a.amount);
@@ -155,7 +160,7 @@ function invPage(){
   <section class="card"><div class="bar"><h3 style="margin:0">Enter values for</h3><input type="date" value="${S.d}" onchange="S.d=this.value"></div>
   ${inv.map(a=>`<div class="row">${txt('accounts',a.id,'name',a.name)}<label>Latest<b>${fmt(a.balance)}</b></label>
     <label>New value<input type="number" step="0.01" placeholder="0.00" onchange="saveVal('${a.id}',this.value)" style="width:120px"></label>
-    <button class="x" onclick="del('accounts','${a.id}')">✕</button></div>`).join('')||'<p class="mut">Add your investment accounts below.</p>'}
+    ${kindSel(a)}<button class="x" onclick="del('accounts','${a.id}')">✕</button></div>`).join('')||'<p class="mut">Add your investment accounts below.</p>'}
   <div class="sum t"><span>Total</span><span>${fmt(sum(inv,a=>a.balance))}</span></div>
   <form onsubmit="event.preventDefault();add('accounts',{name:this.n.value,kind:'investment'})"><input name="n" placeholder="Add investment account" required><button class="pri">Add</button></form></section>`;
 }
@@ -194,14 +199,17 @@ function netPage(){
 
 
 // ---------- year plan ----------
-function planPage(){
-  const y=S.y, mo=[1,2,3,4,5,6,7,8,9,10,11,12], cur=y===now.getFullYear();
+function planData(){
   const C={}; S.cells.forEach(c=>C[c.line_id+'|'+c.month]=c);
-  const ET={}; mo.forEach(m=>ET[m]=sum(S.amt.filter(a=>a.month===m),a=>a.amount));
+  const ET={}; for(let m=1;m<=12;m++) ET[m]=sum(S.amt.filter(a=>a.month===m),a=>a.amount);
   const pl=(l,m)=>{const c=C[l.id+'|'+m]; return c&&c.planned!=null?+c.planned:+l.default_amount};
   const ac=(l,m)=>{ if(l.from_expenses) return ET[m]>0?ET[m]:null; const c=C[l.id+'|'+m]; return c&&c.actual!=null?+c.actual:null };
   const ef=(l,m)=>ac(l,m)??pl(l,m);
-  const inc=S.lines.filter(l=>l.kind==='income'), exp=S.lines.filter(l=>l.kind==='expense');
+  return {C,ET,pl,ac,ef,inc:S.lines.filter(l=>l.kind==='income'),exp:S.lines.filter(l=>l.kind==='expense')};
+}
+function planPage(){
+  const y=S.y, mo=[1,2,3,4,5,6,7,8,9,10,11,12], cur=y===now.getFullYear();
+  const {C,ET,pl,ac,ef,inc,exp}=planData();
   const T=(ls,f,m)=>sum(ls,l=>f(l,m));
   const A=assetsNow();
   const anchor=cur?now.getMonth()+1:null;
