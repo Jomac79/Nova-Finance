@@ -48,7 +48,8 @@ const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const MN = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const now = new Date();
 const S = {tab:'cash', y:now.getFullYear(), m:now.getMonth()+1, d:now.toISOString().slice(0,10),
-           acc:[], exp:[], amt:[], items:[], plans:[], hist:[], lines:[], cells:[], py:[], src:[], ie:[], pm:'plan'};
+           acc:[], exp:[], amt:[], items:[], plans:[], hist:[], lines:[], cells:[], py:[], src:[], ie:[], sl:[], pm:'plan'};
+try{ S.extra=+localStorage.getItem('loan_extra')||0 }catch(e){ S.extra=0 }
 let chart;
 
 const sum = (a,f) => a.reduce((s,x) => s + (+f(x) || 0), 0);
@@ -71,12 +72,13 @@ sb.auth.onAuthStateChange((_,s)=>{ $('auth').hidden=!!s; $('app').hidden=!s; if(
 async function all(t, f=q=>q){ let r=[],i=0; for(;;){ const {data,error}=await f(sb.from(t).select('*')).range(i,i+999); if(error)throw error; r=r.concat(data); if(data.length<1000)return r; i+=1000; } }
 async function load(){
   try{
-    [S.acc,S.exp,S.amt,S.items,S.plans,S.hist,S.lines,S.cells,S.py,S.src,S.ie] = await Promise.all([
+    [S.acc,S.exp,S.amt,S.items,S.plans,S.hist,S.lines,S.cells,S.py,S.src,S.ie,S.sl] = await Promise.all([
       all('accounts',q=>q.order('created_at')), all('expenses',q=>q.order('created_at')),
       all('expense_amounts',q=>q.eq('year',S.y).order('id')), all('cashflow_items',q=>q.eq('year',S.y).order('id')),
       all('month_plans',q=>q.eq('year',S.y).order('id')), all('balance_history',q=>q.order('date')),
       all('plan_lines',q=>q.order('created_at')), all('plan_cells',q=>q.eq('year',S.y).order('id')), all('plan_years',q=>q.order('id')),
-      all('income_sources',q=>q.order('created_at')), all('income_entries',q=>q.gte('date',S.y+'-01-01').lte('date',S.y+'-12-31').order('date',{ascending:false})) ]);
+      all('income_sources',q=>q.order('created_at')), all('income_entries',q=>q.gte('date',S.y+'-01-01').lte('date',S.y+'-12-31').order('date',{ascending:false})),
+      all('student_loans',q=>q.order('name')) ]);
   }catch(e){ return alert(e.message); }
   render();
 }
@@ -186,7 +188,7 @@ function drawChart(){
 
 function netPage(){
   const g=k=>S.acc.filter(a=>a.kind===k), cash=sum(g('cash'),a=>a.balance), inv=sum(g('investment'),a=>a.balance), oth=sum(g('asset'),a=>a.balance);
-  const cc=sum(g('credit'),due), loan=sum(g('loan'),a=>a.balance), A=cash+inv+oth, D=cc+loan;
+  const cc=sum(g('credit'),due), loan=sum(g('loan'),a=>a.balance), sl=sum(S.sl,l=>l.balance), A=cash+inv+oth, D=cc+loan+sl;
   return `<h2>Net worth</h2><section class="card"><div class="stat ${cls(A-D)}">${fmt(A-D)}</div><div class="mut">Assets ${fmt(A)} − Debts ${fmt(D)}</div></section>
   <div class="grid"><section class="card"><h3>Assets</h3>
     <div class="sum"><span>Bank accounts</span><span>${fmt(cash)}</span></div><div class="sum"><span>Investments</span><span>${fmt(inv)}</span></div>
@@ -194,6 +196,7 @@ function netPage(){
     <div class="sum t"><span>Total assets</span><span class="pos">${fmt(A)}</span></div></section>
   <section class="card"><h3>Debts</h3>
     <div class="sum"><span>Credit cards</span><span>${fmt(cc)}</span></div>
+    <div class="sum"><span>Student loans</span><span>${fmt(sl)}</span></div>
     ${g('loan').map(a=>`<div class="sum"><span>${esc(a.name)}</span><span>${fmt(a.balance)}</span></div>`).join('')}
     <div class="sum t"><span>Total debts</span><span class="neg">${fmt(D)}</span></div></section></div>
   ${accBlock(['asset','loan'],'Other assets (home, car…) &amp; loans (mortgage…)')}`;
@@ -306,8 +309,61 @@ async function addSource(e){
   load();
 }
 
+
+// ---------- student loans ----------
+const moLbl=(n,done)=>!done?'50+ years':(Math.floor(n/12)?Math.floor(n/12)+'y ':'')+(n%12)+'m';
+function loanSim(order,extra,roll){
+  const L=S.sl, mins=L.map(l=>+l.min_payment||0), budget=sum(mins,x=>x)+(roll?extra:0);
+  let b=L.map(l=>+l.balance), tot=0, n=0;
+  while(b.some(x=>x>0.005)&&n<600){
+    n++; b=b.map((x,i)=>{ if(x<=0) return 0; const it=x*L[i].rate/1200; tot+=it; return x+it; });
+    let pool=budget; b=b.map((x,i)=>{ if(x<=0) return 0; const pay=Math.min(x,mins[i]); pool-=pay; return x-pay; });
+    if(roll) for(const i of order){ if(pool<=0.005) break; if(b[i]>0){ const pay=Math.min(b[i],pool); b[i]-=pay; pool-=pay; } }
+  }
+  return {n,interest:tot,done:!b.some(x=>x>0.005)};
+}
+function loansPage(){
+  const L=S.sl, idx=L.map((_,i)=>i), tot=sum(L,l=>l.balance), mins=sum(L,l=>l.min_payment), ex=S.extra||0;
+  const mi=l=>(+l.balance)*(+l.rate)/1200, totInt=sum(L,mi);
+  const av=idx.slice().sort((a,b)=>L[b].rate-L[a].rate||L[a].balance-L[b].balance);
+  const sn=idx.slice().sort((a,b)=>L[a].balance-L[b].balance);
+  const rk={}; av.forEach((i,r)=>rk[L[i].id]=r+1);
+  const top=L[av[0]], hasPay=mins>0;
+  const R=hasPay?{min:loanSim([],0,false),sn:loanSim(sn,ex,true),av:loanSim(av,ex,true)}:null;
+  const srow=(t,r,hl)=>`<tr${hl?' style="font-weight:700"':''}><td>${t}</td><td style="text-align:right">${moLbl(r.n,r.done)}</td><td style="text-align:right">${fmt0(r.interest)}</td><td style="text-align:right" class="${R.min.interest-r.interest>0?'pos':''}">${r===R.min?'—':fmt0(R.min.interest-r.interest)}</td></tr>`;
+  const rows=av.map(i=>{ const l=L[i], it=mi(l), pr=(+l.min_payment||0)-it;
+    return `<tr><td>${rk[l.id]}</td><td><input class="en" value="${esc(l.name)}" onchange="upd('student_loans','${l.id}','name',this.value)"></td>
+    <td><input type="number" step="0.01" value="${l.balance}" onchange="upd('student_loans','${l.id}','balance',this.value)"></td>
+    <td><input type="number" step="0.001" style="width:80px" value="${l.rate}" onchange="upd('student_loans','${l.id}','rate',this.value)"></td>
+    <td><input type="number" step="0.01" value="${l.min_payment}" onchange="upd('student_loans','${l.id}','min_payment',this.value)"></td>
+    <td style="text-align:right" class="neg">${fmt(it)}</td><td style="text-align:right" class="${pr<0?'neg':'pos'}">${hasPay&&+l.min_payment?fmt(pr):'—'}</td>
+    <td><button class="x" onclick="del('student_loans','${l.id}')">✕</button></td></tr>`; }).join('');
+  return `<h2>Student loans</h2>
+  <div class="grid">
+    <section class="card"><h3>Total balance</h3><div class="stat neg">${fmt(tot)}</div><div class="mut">${L.length} loans</div></section>
+    <section class="card"><h3>Interest accruing each month</h3><div class="stat">${fmt(totInt)}</div><div class="mut">Weighted average rate ${tot?(totInt*1200/tot).toFixed(2):'0.00'}%</div></section>
+    <section class="card"><h3>Monthly payment</h3><div class="stat">${fmt(mins+ex)}</div><div class="mut">Minimums ${fmt(mins)} + extra ${fmt(ex)}</div></section>
+  </div>
+  ${L.length?`<section class="card"><h3>Pay this first</h3><div class="stat">${esc(top.name)}</div>
+    <div class="mut">${(+top.rate).toFixed(3)}% is your highest rate. It costs ${fmt(mi(top))} a month in interest.</div>
+    <p>Pay at least the minimum on every loan, then put <b>all extra money</b> on this one${ex?` (your extra ${fmt(ex)} a month)`:''}. When it’s paid off, move that whole payment to the next loan in the # column below.
+    This “avalanche” order pays the least interest overall. ${L.filter(l=>+l.rate===+top.rate).length>1?'Loans with the same rate are ordered smallest balance first, which costs the same interest but clears a loan sooner.':''}</p>
+    <label style="flex-direction:row;align-items:center;gap:8px">Extra per month beyond minimums
+    <input type="number" step="1" style="width:110px" value="${ex||''}" placeholder="0" onchange="S.extra=+this.value||0;try{localStorage.setItem('loan_extra',S.extra)}catch(e){};render()"></label></section>`:''}
+  <section class="card"><h3>Your loans, in payoff priority</h3><div class="scroll"><table><thead><tr><th>#</th><th>Loan</th><th>Balance</th><th>Rate %</th><th>Payment / mo</th><th>Interest / mo</th><th>Principal / mo</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+  <form onsubmit="event.preventDefault();add('student_loans',{name:this.n.value,balance:+this.b.value||0,rate:+this.r.value||0,min_payment:+this.p.value||0})">
+    <input name="n" placeholder="Loan name" required><input name="b" type="number" step="0.01" placeholder="Balance" style="width:110px"><input name="r" type="number" step="0.001" placeholder="Rate %" style="width:90px"><input name="p" type="number" step="0.01" placeholder="Payment / mo" style="width:120px"><button class="pri">Add loan</button></form>
+  ${L.some(l=>!+l.min_payment)?`<p class="mut">Don’t know your monthly payments? <button onclick="fillStd()">Estimate 10-year standard payments</button> then replace them with the amounts on your servicer’s site.</p>`:''}
+  <p class="mut">Interest / mo = balance × rate ÷ 12. Principal / mo = payment − interest (red means the balance is growing). Your servicer accrues interest daily, so real figures differ slightly.</p></section>
+  ${R?`<section class="card"><h3>Which strategy wins? (budget ${fmt(mins+ex)} / month)</h3><div class="scroll"><table class="cmp"><thead><tr><th></th><th>Debt-free in</th><th>Total interest</th><th>Interest saved</th></tr></thead><tbody>
+    ${srow('Minimums only (no rollover)',R.min)}${srow('Snowball (smallest balance first)',R.sn)}${srow('Avalanche (highest rate first)',R.av,1)}</tbody></table></div>
+    <p class="mut">Estimates assume the same payment every month and no changes in rates. This is general information, not financial advice. Federal loans may also have forgiveness or income-based options worth checking with your servicer before paying extra.</p></section>`
+   :(L.length?`<p class="mut">Enter your monthly payments above to see payoff times and strategy comparisons.</p>`:'')}`;
+}
+const fillStd=()=>Promise.all(S.sl.filter(l=>!+l.min_payment).map(l=>{ const r=l.rate/1200, B=+l.balance, pm=r?B*r/(1-Math.pow(1+r,-120)):B/120; return sb.from('student_loans').update({min_payment:Math.round(pm*100)/100}).eq('id',l.id); })).then(load);
+
 // ---------- shell ----------
-const TABS={cash:['Cash flow',cashPage],plan:['Year plan',planPage],inc:['Income',incPage],exp:['Expenses',expPage],inv:['Investing',invPage],net:['Net worth',netPage]};
+const TABS={cash:['Cash flow',cashPage],plan:['Year plan',planPage],inc:['Income',incPage],exp:['Expenses',expPage],inv:['Investing',invPage],loans:['Student loans',loansPage],net:['Net worth',netPage]};
 function render(){
   $('nav').innerHTML=Object.entries(TABS).map(([k,[n]])=>`<button class="${k===S.tab?'on':''}" onclick="S.tab='${k}';render()">${n}</button>`).join('')+`<button onclick="sb.auth.signOut()">Sign out</button>`;
   $('v').innerHTML=TABS[S.tab][1]();
