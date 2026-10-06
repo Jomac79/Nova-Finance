@@ -48,7 +48,7 @@ const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const MN = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const now = new Date();
 const S = {tab:'cash', y:now.getFullYear(), m:now.getMonth()+1, d:now.toISOString().slice(0,10),
-           acc:[], exp:[], amt:[], items:[], plans:[], hist:[], lines:[], cells:[], py:[], src:[], ia:[], pm:'plan'};
+           acc:[], exp:[], amt:[], items:[], plans:[], hist:[], lines:[], cells:[], py:[], src:[], ie:[], pm:'plan'};
 let chart;
 
 const sum = (a,f) => a.reduce((s,x) => s + (+f(x) || 0), 0);
@@ -71,17 +71,17 @@ sb.auth.onAuthStateChange((_,s)=>{ $('auth').hidden=!!s; $('app').hidden=!s; if(
 async function all(t, f=q=>q){ let r=[],i=0; for(;;){ const {data,error}=await f(sb.from(t).select('*')).range(i,i+999); if(error)throw error; r=r.concat(data); if(data.length<1000)return r; i+=1000; } }
 async function load(){
   try{
-    [S.acc,S.exp,S.amt,S.items,S.plans,S.hist,S.lines,S.cells,S.py,S.src,S.ia] = await Promise.all([
+    [S.acc,S.exp,S.amt,S.items,S.plans,S.hist,S.lines,S.cells,S.py,S.src,S.ie] = await Promise.all([
       all('accounts',q=>q.order('created_at')), all('expenses',q=>q.order('created_at')),
       all('expense_amounts',q=>q.eq('year',S.y).order('id')), all('cashflow_items',q=>q.eq('year',S.y).order('id')),
       all('month_plans',q=>q.eq('year',S.y).order('id')), all('balance_history',q=>q.order('date')),
       all('plan_lines',q=>q.order('created_at')), all('plan_cells',q=>q.eq('year',S.y).order('id')), all('plan_years',q=>q.order('id')),
-      all('income_sources',q=>q.order('created_at')), all('income_amounts',q=>q.eq('year',S.y).order('id')) ]);
+      all('income_sources',q=>q.order('created_at')), all('income_entries',q=>q.gte('date',S.y+'-01-01').lte('date',S.y+'-12-31').order('date',{ascending:false})) ]);
   }catch(e){ return alert(e.message); }
   render();
 }
 async function run(p){ const {error}=await p; if(error) return alert(error.message); await load(); }
-const upd = (t,id,f,v) => run(sb.from(t).update({[f]: ['name','label','kind'].includes(f) ? v : (+v||0)}).eq('id',id));
+const upd = (t,id,f,v) => run(sb.from(t).update({[f]: ['name','label','kind','date','source_id'].includes(f) ? v : (+v||0)}).eq('id',id));
 const add = (t,row) => run(sb.from(t).insert(row));
 const del = (t,id) => confirm('Delete this?') && run(sb.from(t).delete().eq('id',id));
 const num = (t,id,f,v) => `<input type="number" step="0.01" value="${v??0}" onchange="upd('${t}','${id}','${f}',this.value)">`;
@@ -206,7 +206,7 @@ function planData(){
   const C={}; S.cells.forEach(c=>C[c.line_id+'|'+c.month]=c);
   const ET={}; for(let m=1;m<=12;m++) ET[m]=sum(S.amt.filter(a=>a.month===m),a=>a.amount);
   const pl=(l,m)=>{const c=C[l.id+'|'+m]; return c&&c.planned!=null?+c.planned:+l.default_amount};
-  const IA={}; S.ia.forEach(a=>IA[a.source_id+'|'+a.month]=+a.amount);
+  const IA={}; S.ie.forEach(e=>{ const k=e.source_id+'|'+(+e.date.slice(5,7)); IA[k]=(IA[k]||0)+(+e.amount); });
   const ac=(l,m)=>{ if(l.from_expenses) return ET[m]>0?ET[m]:null; if(l.income_source_id){ const v=IA[l.income_source_id+'|'+m]; return v>0?v:null } const c=C[l.id+'|'+m]; return c&&c.actual!=null?+c.actual:null };
   const ef=(l,m)=>ac(l,m)??pl(l,m);
   return {C,ET,pl,ac,ef,inc:S.lines.filter(l=>l.kind==='income'),exp:S.lines.filter(l=>l.kind==='expense')};
@@ -265,18 +265,31 @@ const addStarter=()=>run(sb.from('plan_lines').insert([{name:'Salary',kind:'inco
 
 // ---------- income page ----------
 function incPage(){
-  const A={}, mo=[1,2,3,4,5,6,7,8,9,10,11,12]; S.ia.forEach(a=>A[a.source_id+'|'+a.month]=a.amount);
+  const mo=[1,2,3,4,5,6,7,8,9,10,11,12], A={}, t=new Date();
+  const today=t.getFullYear()+'-'+String(t.getMonth()+1).padStart(2,'0')+'-'+String(t.getDate()).padStart(2,'0');
+  S.ie.forEach(e=>{ const k=e.source_id+'|'+(+e.date.slice(5,7)); A[k]=(A[k]||0)+(+e.amount); });
   const mt=m=>sum(S.src,x=>A[x.id+'|'+m]);
+  const opts=sel=>S.src.map(x=>`<option value="${x.id}"${x.id===sel?' selected':''}>${esc(x.name)}</option>`).join('');
   return `<div class="bar"><button onclick="S.y--;load()">‹</button><h2 style="margin:0">Income ${S.y}</h2><button onclick="S.y++;load()">›</button></div>
-  <section class="card scroll"><table><thead><tr><th class="sticky"></th>${MN.map(n=>`<th>${n}</th>`).join('')}<th>Year</th><th></th></tr></thead><tbody>
+  <section class="card"><h3>Add income</h3>
+  ${S.src.length?`<form style="margin-top:0" onsubmit="addEntry(event)"><input type="date" name="d" value="${today}" required><select name="s">${opts()}</select>
+    <input name="a" type="number" step="0.01" placeholder="Amount" required style="width:130px"><button class="pri">Add</button></form>
+    <p class="mut">Pick the date you were paid. It goes into that month and year automatically.</p>`:'<p class="mut">Add an income source first (e.g. Salary, Rent) using the box below.</p>'}</section>
+  <section class="card scroll"><h3>Monthly totals</h3><table><thead><tr><th class="sticky"></th>${MN.map(n=>`<th>${n}</th>`).join('')}<th>Year</th><th></th></tr></thead><tbody>
   ${S.src.map(x=>`<tr><td class="sticky"><input class="en" value="${esc(x.name)}" onchange="upd('income_sources','${x.id}','name',this.value)"></td>
-    ${mo.map(m=>`<td><input type="number" step="0.01" value="${A[x.id+'|'+m]??''}" onchange="setIncAmt('${x.id}',${m},this.value)"></td>`).join('')}
-    <td><b>${fmt(sum(mo,m=>A[x.id+'|'+m]))}</b></td><td><button class="x" onclick="del('income_sources','${x.id}')">✕</button></td></tr>`).join('')}
-  </tbody><tfoot><tr><td class="sticky">Total</td>${mo.map(m=>`<td>${fmt(mt(m))}</td>`).join('')}<td>${fmt(sum(mo,mt))}</td><td></td></tr></tfoot></table>
-  <form onsubmit="addSource(event)"><input name="n" placeholder="New income source (e.g. Salary, Rent)" required><button class="pri">Add</button></form></section>
-  <p class="mut">Enter what you actually received each month. Each source is linked to a line on the Year plan (adding a source creates that line for you), so the plan’s actuals update automatically.</p>`;
+    ${mo.map(m=>`<td style="text-align:right">${A[x.id+'|'+m]?fmt0(A[x.id+'|'+m]):'<span class="mut">—</span>'}</td>`).join('')}
+    <td style="text-align:right"><b>${fmt0(sum(mo,m=>A[x.id+'|'+m]))}</b></td><td><button class="x" title="Deletes this source and its entries" onclick="del('income_sources','${x.id}')">✕</button></td></tr>`).join('')}
+  </tbody><tfoot><tr><td class="sticky">Total</td>${mo.map(m=>`<td style="text-align:right">${fmt0(mt(m))}</td>`).join('')}<td style="text-align:right">${fmt0(sum(mo,mt))}</td><td></td></tr></tfoot></table>
+  <form onsubmit="addSource(event)"><input name="n" placeholder="New income source (e.g. Salary, Rent)" required><button class="pri">Add source</button></form></section>
+  <section class="card"><h3>${S.y} entries</h3>
+  ${S.ie.map(e=>`<div class="row"><input type="date" value="${e.date}" onchange="upd('income_entries','${e.id}','date',this.value)"><select onchange="upd('income_entries','${e.id}','source_id',this.value)">${opts(e.source_id)}</select>${num('income_entries',e.id,'amount',e.amount)}<button class="x" onclick="del('income_entries','${e.id}')">✕</button></div>`).join('')||'<p class="mut">No entries for this year yet.</p>'}</section>
+  <p class="mut">Each source is linked to a line on the Year plan, so its monthly totals appear there as actuals automatically.</p>`;
 }
-const setIncAmt=(id,m,v)=>run(sb.from('income_amounts').upsert({source_id:id,year:S.y,month:m,amount:+v||0},{onConflict:'source_id,year,month'}));
+async function addEntry(e){
+  e.preventDefault(); const f=e.target, d=f.d.value; if(!d||!f.s.value) return;
+  const {error}=await sb.from('income_entries').insert({source_id:f.s.value,date:d,amount:+f.a.value||0}); if(error) return alert(error.message);
+  S.y=+d.slice(0,4); load();
+}
 async function addSource(e){
   e.preventDefault(); const n=e.target.n.value;
   const {data,error}=await sb.from('income_sources').insert({name:n}).select().single(); if(error) return alert(error.message);
