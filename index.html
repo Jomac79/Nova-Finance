@@ -29,6 +29,7 @@ td input[type=number]{width:74px;padding:6px}td input.en{width:150px}tfoot td{fo
 td.sticky,th.sticky{position:sticky;left:0;background:var(--card);z-index:1}td input.ov{border-color:var(--ac)}.sm td{border-top:1px solid var(--line);font-weight:600;text-align:right}.sm td:first-child{text-align:left}
 nav{overflow-x:auto}nav button{white-space:nowrap}
 .cmp td+td,.cmp th+th{text-align:right}.cmp td.sub{color:var(--mut);padding-left:18px;font-size:12px}.cmp tr.t td{border-top:1px solid var(--line);font-weight:700}
+.xb{display:flex;justify-content:flex-end;gap:8px;margin-bottom:6px}.xb button{font-size:12px;padding:6px 10px;cursor:pointer}
 #auth{max-width:340px;margin:12vh auto;padding:16px}#auth input{width:100%;margin-bottom:10px}
 </style></head><body>
 <div id="auth" hidden>
@@ -42,6 +43,9 @@ nav{overflow-x:auto}nav button{white-space:nowrap}
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <script src="config.js"></script>
 <script>
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -362,11 +366,80 @@ function loansPage(){
 }
 const fillStd=()=>Promise.all(S.sl.filter(l=>!+l.min_payment).map(l=>{ const r=l.rate/1200, B=+l.balance, pm=r?B*r/(1-Math.pow(1+r,-120)):B/120; return sb.from('student_loans').update({min_payment:Math.round(pm*100)/100}).eq('id',l.id); })).then(load);
 
+
+// ---------- export (Excel / PDF) ----------
+const XB='<div class="xb"><button onclick="exportPage(\'xlsx\')">⬇ Excel</button><button onclick="exportPage(\'pdf\')">⬇ PDF</button></div>';
+const localDate=()=>{ const t=new Date(); return t.getFullYear()+'-'+String(t.getMonth()+1).padStart(2,'0')+'-'+String(t.getDate()).padStart(2,'0'); };
+const toNum=v=>{ if(typeof v!=='string') return v; const m=v.match(/^(-?)\$?(-?)([\d,]+(\.\d+)?)$/); return m?((m[1]||m[2])?-1:1)*parseFloat(m[3].replace(/,/g,'')):v; };
+function scrape(){
+  const live=[...$('v').querySelectorAll('input,select')], root=$('v').cloneNode(true);
+  [...root.querySelectorAll('input,select')].forEach((el,i)=>{ const o=live[i]; let v='';
+    if(o.tagName==='SELECT') v=o.options[o.selectedIndex]?o.options[o.selectedIndex].text:''; else if(o.type==='checkbox') v=o.checked?'yes':''; else if(o.type!=='hidden') v=o.value;
+    const sp=document.createElement('span'); sp.textContent=v; el.replaceWith(sp); });
+  root.querySelectorAll('button,canvas,form,.xb').forEach(e=>e.remove());
+  const clean=t=>(t||'').replace(/\s+/g,' ').trim();
+  const cells=el=>[...el.childNodes].map(n=>n.nodeType===3?clean(n.textContent):(n.tagName==='LABEL'?[...n.childNodes].map(c=>clean(c.textContent)).filter(Boolean).join(': '):clean(n.textContent))).filter(Boolean);
+  const tn=TABS[S.tab][0], h2=clean((root.querySelector('h2')||{}).textContent), title=h2.startsWith(tn)?h2:(h2?tn+' - '+h2:tn);
+  const secs=[...root.querySelectorAll('section.card')].map(sec=>{
+    const rows=[], h=sec.querySelector('h3');
+    [...sec.children].forEach(ch=>{
+      if(ch.tagName==='H3') return;
+      const tb=ch.tagName==='TABLE'?ch:ch.querySelector('table');
+      if(tb){ tb.querySelectorAll('tr').forEach(tr=>rows.push([...tr.children].map(c=>clean(c.textContent)))); return; }
+      if(ch.classList.contains('row')||ch.classList.contains('sum')){ const c=cells(ch); if(c.length) rows.push(c); return; }
+      const t=clean(ch.textContent); if(t) rows.push([t]);
+    });
+    return {name:h?clean(h.textContent):'',rows,table:!!sec.querySelector('table')};
+  });
+  return {title,tn,secs};
+}
+const period=()=>S.tab==='cash'?MN[S.m-1]+' '+S.y:['plan','inc','exp'].includes(S.tab)?String(S.y):localDate();
+function exportXlsx(){
+  const {title,tn,secs}=scrape(), aoa=[[title],['Exported '+localDate()],[]];
+  secs.forEach(s=>{ if(s.name) aoa.push([s.name.toUpperCase()]); s.rows.forEach(r=>aoa.push(r.map(toNum))); aoa.push([]); });
+  const ws=XLSX.utils.aoa_to_sheet(aoa), w=[];
+  aoa.forEach(r=>r.forEach((v,i)=>{ w[i]=Math.max(w[i]||8,Math.min(String(v??'').length+2,40)); }));
+  ws['!cols']=w.map(x=>({wch:x}));
+  Object.keys(ws).forEach(k=>{ if(k[0]!=='!'&&ws[k].t==='n') ws[k].z='#,##0.00'; });
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,tn.replace(/[\\\/?*\[\]:]/g,'').slice(0,31));
+  if(S.tab==='inv'){ const nm={}; S.acc.forEach(a=>nm[a.id]=a.name);
+    const hs=XLSX.utils.aoa_to_sheet([['Date','Account','Balance'],...S.hist.map(x=>[x.date,nm[x.account_id]||'',+x.balance])]); hs['!cols']=[{wch:12},{wch:26},{wch:14}];
+    XLSX.utils.book_append_sheet(wb,hs,'History'); }
+  XLSX.writeFile(wb,('Ledger - '+tn+' '+period()+'.xlsx').replace(/[\\\/:*?"<>|]/g,'-'));
+}
+function exportPdf(){
+  const {title,tn,secs}=scrape(), maxC=Math.max(1,...secs.map(s=>Math.max(0,...s.rows.map(r=>r.length))));
+  const doc=new window.jspdf.jsPDF({orientation:maxC>7?'landscape':'portrait',unit:'pt',format:'letter'});
+  const cl=t=>String(t??'').replace(/[−–—]/g,'-').replace(/[‘’]/g,"'").replace(/[“”]/g,'"').replace(/…/g,'...').replace(/[^\x20-\xFF]/g,'');
+  const PH=doc.internal.pageSize.getHeight(), PW=doc.internal.pageSize.getWidth();
+  let y=42; doc.setFontSize(16); doc.setTextColor(30); doc.text(cl(title),40,y); doc.setFontSize(9); doc.setTextColor(120); doc.text('Exported '+localDate(),40,y+14); y+=34;
+  const cv=S.tab==='inv'?$('ch'):null;
+  if(cv&&cv.width){ try{ const w=PW-80, h=Math.min(w*cv.height/cv.width,200); doc.addImage(cv.toDataURL('image/png'),'PNG',40,y,w,h); y+=h+16; }catch(e){} }
+  secs.forEach(s=>{
+    if(!s.rows.length) return;
+    const wd=Math.max(...s.rows.map(r=>r.length)), body=s.rows.map(r=>{ const a=r.map(cl); while(a.length<wd) a.push(''); return a; });
+    const head=s.table?[body.shift()]:undefined;
+    if(y>PH-110){ doc.addPage(); y=42; }
+    if(s.name){ doc.setFontSize(11); doc.setTextColor(40); doc.text(cl(s.name),40,y); y+=6; }
+    doc.autoTable({startY:y,head,body,margin:{left:40,right:40},theme:s.table?'striped':'plain',styles:{fontSize:wd>10?6.5:8.5,cellPadding:3},headStyles:{fillColor:[79,140,255]},
+      didParseCell:d=>{ if(d.column.index>0&&typeof d.cell.raw==='string'&&/^-?\$?[\d,]/.test(d.cell.raw)) d.cell.styles.halign='right'; }});
+    y=doc.lastAutoTable.finalY+20;
+  });
+  doc.save(('Ledger - '+tn+' '+period()+'.pdf').replace(/[\\\/:*?"<>|]/g,'-'));
+}
+function exportPage(t){
+  try{
+    if(t==='xlsx'&&!window.XLSX) return alert('The Excel library did not load. Check your connection or ad blocker and refresh.');
+    if(t==='pdf'&&!(window.jspdf&&window.jspdf.jsPDF)) return alert('The PDF library did not load. Check your connection or ad blocker and refresh.');
+    t==='xlsx'?exportXlsx():exportPdf();
+  }catch(e){ alert('Export failed: '+e.message); }
+}
+
 // ---------- shell ----------
 const TABS={cash:['Cash flow',cashPage],plan:['Year plan',planPage],inc:['Income',incPage],exp:['Expenses',expPage],inv:['Investing',invPage],loans:['Student loans',loansPage],net:['Net worth',netPage]};
 function render(){
   $('nav').innerHTML=Object.entries(TABS).map(([k,[n]])=>`<button class="${k===S.tab?'on':''}" onclick="S.tab='${k}';render()">${n}</button>`).join('')+`<button onclick="sb.auth.signOut()">Sign out</button>`;
-  $('v').innerHTML=TABS[S.tab][1]();
+  $('v').innerHTML=XB+TABS[S.tab][1]();
 }
 sb.auth.getSession().then(({data})=>{ $('auth').hidden=!!data.session; $('app').hidden=!data.session; });
 </script></body></html>
